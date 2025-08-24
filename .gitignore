@@ -9,6 +9,7 @@ __pycache__/
 .env
 .env.local
 *.json
+!agent-map.json
 
 # Virtualenv
 .venv/
