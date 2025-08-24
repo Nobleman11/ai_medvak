@@ -12,9 +12,9 @@ from telegram.ext import (
     filters,
 )
 
-from . import api
-from .parser_csv import sanitize_csv_text, is_probable_csv_text
-from .keyboards import preview_item_kb
+import api
+from parser_csv import sanitize_csv_text, is_probable_csv_text
+from keyboards import preview_item_kb
 
 log = logging.getLogger("bot.handlers")
 

@@ -13,7 +13,7 @@ from agent.tools.write import write_records
 from agent.tools.scrape_zp import scrape_zarplata
 from agent.tools.scrape_hh import scrape_hh
 
-from config import settings
+from agent.config import settings
 
 # Chat LLM (для small talk; NLU ниже — правилaми, без токенов)
 from openai import OpenAI

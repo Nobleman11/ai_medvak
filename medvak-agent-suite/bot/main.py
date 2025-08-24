@@ -3,8 +3,8 @@ import logging
 import os
 from telegram.ext import Application
 
-from . import handlers
-from .api import close_client
+import handlers
+from api import close_client
 
 logging.basicConfig(
     level=os.getenv("BOT_LOG_LEVEL", "INFO"),
@@ -21,7 +21,8 @@ def main():
     handlers.register(app)
 
     # корректно закрыть httpx клиент при остановке
-    app.post_stop.add_callback(close_client)
+    import atexit, asyncio
+    atexit.register(lambda: asyncio.run(close_client()))
 
     app.run_polling(allowed_updates=["message", "callback_query"])
 
