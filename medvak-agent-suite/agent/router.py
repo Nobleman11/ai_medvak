@@ -6,12 +6,12 @@ from typing import List, Optional, Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from tools.schema import Record, PreviewItem
-from tools.ingest_csv import parse_csv_text
-from tools.preview import preview_records
-from tools.write import write_records
-from tools.scrape_zp import scrape_zarplata
-from tools.scrape_hh import scrape_hh
+from agent.tools.schema import Record, PreviewItem
+from agent.tools.ingest_csv import parse_csv_text
+from agent.tools.preview import preview_records
+from agent.tools.write import write_records
+from agent.tools.scrape_zp import scrape_zarplata
+from agent.tools.scrape_hh import scrape_hh
 
 from config import settings
 
@@ -59,7 +59,7 @@ class ChatResponse(BaseModel):
 # ────────────────────────────── helpers ───────────────────────────────
 _ALIASES = None
 def _load_aliases() -> dict:
-    from tools.normalize import load_aliases
+    from agent.tools.normalize import load_aliases
     global _ALIASES
     if _ALIASES is None:
         _ALIASES = load_aliases(settings.ALIASES_FILE)

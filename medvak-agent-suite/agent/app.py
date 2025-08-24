@@ -5,8 +5,8 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from router import api
-from config import settings
+from agent.router import api
+from agent.config import settings
 
 # ────────────────────────────── logging ──────────────────────────────
 logging.basicConfig(
