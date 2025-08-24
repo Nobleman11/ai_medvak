@@ -1,0 +1,99 @@
+version: "3.9"
+
+services:
+  medvak_agent:
+    build:
+      context: ../agent
+    image: medvak/agent:latest
+    env_file: .env
+    environment:
+      TZ: ${TZ}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      AGENT_MODEL: ${AGENT_MODEL}
+      AGENT_HOST: ${AGENT_HOST}
+      AGENT_PORT: ${AGENT_PORT}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL}
+      AGENT_ALLOWED_ORIGINS: ${AGENT_ALLOWED_ORIGINS}
+
+      NOCODB_BASE: ${NOCODB_BASE}
+      NOCODB_TOKEN_VAC: ${NOCODB_TOKEN_VAC}
+      NOCODB_TOKEN_STAT: ${NOCODB_TOKEN_STAT}
+
+      VACANCIES_TABLE_ODKB_ID: ${VACANCIES_TABLE_ODKB_ID}
+      VACANCIES_VIEW_ODKB_ID: ${VACANCIES_VIEW_ODKB_ID}
+      VAC_REQ_ODKB_REL: ${VAC_REQ_ODKB_REL}
+
+      WEB_SCRAPE_ENABLED: ${WEB_SCRAPE_ENABLED}
+      AUTO_WRITE_ENABLED: ${AUTO_WRITE_ENABLED}
+      AUTO_WRITE_THRESHOLD: ${AUTO_WRITE_THRESHOLD}
+      PREVIEW_PAGE_SIZE: ${PREVIEW_PAGE_SIZE}
+      WEB_DEFAULT_PAGES: ${WEB_DEFAULT_PAGES}
+
+      HTTPX_MAX_CONN: ${HTTPX_MAX_CONN}
+      HTTPX_MAX_KEEPALIVE: ${HTTPX_MAX_KEEPALIVE}
+      REQUEST_TIMEOUT_SEC: ${REQUEST_TIMEOUT_SEC}
+      RETRY_ATTEMPTS: ${RETRY_ATTEMPTS}
+      RETRY_BACKOFF_BASE: ${RETRY_BACKOFF_BASE}
+
+      AGENT_MAP_PATH: ${AGENT_MAP_PATH}
+      ALIASES_FILE: ${ALIASES_FILE}
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: [ "CMD", "bash", "-lc", "./ops/healthcheck.sh" ]
+      interval: 20s
+      timeout: 3s
+      retries: 5
+    working_dir: /app
+    volumes:
+      - ..:/app
+    restart: unless-stopped
+    logging:
+      driver: "local"
+      options:
+        max-size: ${LOG_MAX_SIZE}
+        max-file: ${LOG_MAX_FILE}
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 128M
+    networks: [ medvak_net ]
+
+  medvak_bot:
+    build:
+      context: ../bot
+    image: medvak/bot:latest
+    env_file: .env
+    environment:
+      TZ: ${TZ}
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_LOG_LEVEL: ${BOT_LOG_LEVEL}
+      AGENT_INTERNAL_URL: ${AGENT_INTERNAL_URL}
+      REQUEST_TIMEOUT_SEC: ${REQUEST_TIMEOUT_SEC}
+      HTTPX_MAX_CONN: ${HTTPX_MAX_CONN}
+      HTTPX_MAX_KEEPALIVE: ${HTTPX_MAX_KEEPALIVE}
+    working_dir: /app
+    volumes:
+      - ..:/app
+    depends_on:
+      medvak_agent:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "local"
+      options:
+        max-size: ${LOG_MAX_SIZE}
+        max-file: ${LOG_MAX_FILE}
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    networks: [ medvak_net ]
+
+networks:
+  medvak_net:
+    driver: bridge
