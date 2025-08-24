@@ -1,22 +1,32 @@
 from __future__ import annotations
-import io
-import logging
 import os
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from telegram.ext import ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram import Update
+from telegram.ext import (
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+)
 
 from . import api
+from .parser_csv import sanitize_csv_text, is_probable_csv_text
+from .keyboards import preview_item_kb
 
 log = logging.getLogger("bot.handlers")
 
-# In-memory состояние (на пользователя)
+# Состояние на пользователя (минимум — выбранная таблица и текущий PREVIEW)
 STATE: Dict[int, Dict[str, Any]] = {}
-DEFAULT_REL = os.getenv("VAC_REQ_ODKB_REL", "Требования")  # просто имя поля-связи, если будет нужно
-ENV_ODKB_TABLE = os.getenv("VACANCIES_TABLE_ODKB_ID", "")  # не дефолт — только подсказка
 
-# ─────────────────────────────── utils ───────────────────────────────
+DEFAULT_REL = os.getenv("VAC_REQ_ODKB_REL", "Требования")
+ENV_ODKB_TABLE = os.getenv("VACANCIES_TABLE_ODKB_ID", "")
+CHAT_ENABLED = os.getenv("CHAT_ENABLED", "0") == "1"
+WEB_SCRAPE_ENABLED = os.getenv("WEB_SCRAPE_ENABLED", "0") == "1"
+WEB_DEFAULT_PAGES = int(os.getenv("WEB_DEFAULT_PAGES", "2"))
+
 
 def _ensure_state(user_id: int) -> Dict[str, Any]:
     st = STATE.get(user_id)
@@ -25,46 +35,44 @@ def _ensure_state(user_id: int) -> Dict[str, Any]:
         STATE[user_id] = st
     return st
 
-def _render_item_card(item: Dict[str, Any], idx: int) -> Tuple[str, InlineKeyboardMarkup]:
+
+def _render_item_card(item: Dict[str, Any], idx: int) -> Tuple[str, 'InlineKeyboardMarkup']:
     rec = item.get("record", {})
     uncertain = item.get("uncertain", [])
     conf = item.get("confidence", 0)
 
     title = rec.get("Title") or "(без заголовка)"
-    dept = rec.get("Отделение")
-    role = rec.get("Должность")
-    worker = ", ".join(rec.get("Работник", []) or [])
-    schedule = ", ".join(rec.get("График", []) or [])
-    shift = ", ".join(rec.get("Тип_смены", []) or [])
-    time_ = ", ".join(rec.get("Время_работы", []) or [])
-    salary = rec.get("Зарплата")
-    contact = rec.get("Контактное_лицо")
-    status = rec.get("Статус")
+    dept = rec.get("Отделение") or "—"
+    role = rec.get("Должность") or "—"
+    worker = ", ".join(rec.get("Работник", []) or []) or "—"
+    schedule = ", ".join(rec.get("График", []) or []) or "—"
+    shift = ", ".join(rec.get("Тип_смены", []) or []) or "—"
+    time_ = ", ".join(rec.get("Время_работы", []) or []) or "—"
+    salary = rec.get("Зарплата") or "—"
+    contact = rec.get("Контактное_лицо") or "—"
+    status = rec.get("Статус") or "—"
 
     lines = [
         f"🔎 #{idx+1} • conf={conf}",
         f"🧾 {title}",
-        f"🏥 Отделение: {dept or '—'}",
-        f"👤 Должность: {role or '—'}",
-        f"👥 Работник: {worker or '—'}",
-        f"📅 График: {schedule or '—'}",
-        f"🕒 Смены: {shift or '—'}",
-        f"⏱ Время: {time_ or '—'}",
-        f"💰 Зарплата: {salary or '—'}",
-        f"☎️ Контакт: {contact or '—'}",
-        f"📌 Статус: {status or '—'}",
+        f"🏥 Отделение: {dept}",
+        f"👤 Должность: {role}",
+        f"👥 Работник: {worker}",
+        f"📅 График: {schedule}",
+        f"🕒 Смены: {shift}",
+        f"⏱ Время: {time_}",
+        f"💰 Зарплата: {salary}",
+        f"☎️ Контакт: {contact}",
+        f"📌 Статус: {status}",
     ]
     if uncertain:
         ulist = "; ".join([f"{u.get('field')} ⇒ {', '.join(u.get('suggest', []) or [])}" for u in uncertain])
         lines.append(f"⚠️ Непопадания: {ulist}")
 
-    kb = [
-        [InlineKeyboardButton("✅ Записать эту", callback_data=f"write_one:{idx}"),
-         InlineKeyboardButton("⏭ Пропустить", callback_data=f"skip_one:{idx}")]
-    ]
-    return "\n".join(lines), InlineKeyboardMarkup(kb)
+    return "\n".join(lines), preview_item_kb(idx)
 
-async def _require_table(update: Update, context: ContextTypes.DEFAULT_TYPE, st: Dict[str, Any]) -> bool:
+
+async def _require_table(update: Update, _: ContextTypes.DEFAULT_TYPE, st: Dict[str, Any]) -> bool:
     if st.get("table_id"):
         return True
     hint = f"\n\nНапример: /use_table {ENV_ODKB_TABLE}" if ENV_ODKB_TABLE else ""
@@ -73,27 +81,30 @@ async def _require_table(update: Update, context: ContextTypes.DEFAULT_TYPE, st:
     )
     return False
 
-# ─────────────────────────────── commands ────────────────────────────
+
+# ---------------------- Commands ----------------------
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = _ensure_state(update.effective_user.id)
-    cfg = await api.agent_config()
     msg = [
-        "👋 Привет! Я готов превратить CSV в PREVIEW и записать в NocoDB.",
-        "Отправьте CSV-файл или текст CSV, затем используйте /preview или /confirm.",
-        "",
-        "Полезное:",
-        "• /use_table <TABLE_ID> — выбрать таблицу для записи",
-        f"• /use_rel <REL_NAME> — имя связи требований (сейчас: {st.get('rel_name')})",
-        "• /parse — если текст CSV в сообщении",
-        "• /confirm — записать ВСЕ текущие карточки",
-        "• /status — статус агента",
+        "👋 Привет! Я превращаю CSV в чистые записи NocoDB.",
+        "Команды:",
+        "• /use_table <TABLE_ID> — куда писать",
+        f"• /use_rel <REL_NAME> — связь требований (сейчас: {st.get('rel_name')})",
+        "• /parse <CSV-текст> — превью из текста",
+        "• /preview — показать текущие карточки",
+        "• /confirm — записать все карточки",
+        "• /status — здоровье агента",
     ]
+    if CHAT_ENABLED:
+        msg.append("Чат включён — можете писать свободным текстом (например: «найди на зарплата ру медсестёр в ОДКБ на 2 страницы»).")
     await update.message.reply_text("\n".join(msg))
+
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     h = await api.agent_health()
     await update.message.reply_text(f"✅ agent ok: {h}")
+
 
 async def cmd_use_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = _ensure_state(update.effective_user.id)
@@ -103,6 +114,7 @@ async def cmd_use_table(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st["table_id"] = context.args[0].strip()
     await update.message.reply_text(f"Таблица установлена: `{st['table_id']}`", parse_mode="Markdown")
 
+
 async def cmd_use_rel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = _ensure_state(update.effective_user.id)
     if not context.args:
@@ -111,12 +123,13 @@ async def cmd_use_rel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st["rel_name"] = " ".join(context.args).strip()
     await update.message.reply_text(f"Имя связи установлено: {st['rel_name']}")
 
+
 async def cmd_parse(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Если CSV в тексте (после команды) — превью."""
+    """CSV-текст после команды → превью."""
     text = update.message.text or ""
     csv_text = text.partition(" ")[2].strip()
     if not csv_text:
-        await update.message.reply_text("Пришлите текст CSV после команды, либо отправьте CSV-файл (я поймаю).")
+        await update.message.reply_text("Пришлите текст CSV после команды, либо просто отправьте CSV-файл.")
         return
     data = await api.preview_csv(csv_text)
     items = data.get("items", [])
@@ -125,13 +138,15 @@ async def cmd_parse(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Готово. Найдено карточек: {len(items)}")
     await _send_preview_batch(update, context, items)
 
+
 async def cmd_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = _ensure_state(update.effective_user.id)
     items = st.get("preview", [])
     if not items:
-        await update.message.reply_text("Нет подготовленных карточек. Отправьте CSV или используйте /parse.")
+        await update.message.reply_text("Нет карточек. Пришлите CSV или используйте /parse.")
         return
     await _send_preview_batch(update, context, items)
+
 
 async def cmd_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = _ensure_state(update.effective_user.id)
@@ -141,46 +156,101 @@ async def cmd_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not items:
         await update.message.reply_text("Нечего записывать. Сначала сделайте PREVIEW.")
         return
-    # вытаскиваем records
     records = [it.get("record", {}) for it in items]
     res = await api.write_records(records, table_id=st["table_id"], rel_name=st.get("rel_name"))
     await update.message.reply_text(f"Результат записи: {res}")
 
-# ───────────────────────────── documents/text ─────────────────────────
+
+# ---------------- Documents / Text ----------------
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Пришёл CSV-файл — читаем до ~1 МБ и отдаём в /preview."""
+    """CSV-файл → превью."""
     doc = update.message.document
     if not doc:
         return
     if not (doc.file_name or "").lower().endswith((".csv", ".txt")):
         await update.message.reply_text("Пришлите CSV или TXT файл.")
         return
+
     file = await doc.get_file()
-    bio = await file.download_as_bytearray()
+    data = await file.download_as_bytearray()
     try:
-        csv_text = bio.decode("utf-8")
+        csv_text = data.decode("utf-8")
     except UnicodeDecodeError:
-        csv_text = bio.decode("cp1251", errors="replace")
-    data = await api.preview_csv(csv_text)
-    items = data.get("items", [])
+        csv_text = data.decode("cp1251", errors="replace")
+    csv_text = sanitize_csv_text(csv_text)
+
+    preview = await api.preview_csv(csv_text)
+    items = preview.get("items", [])
     st = _ensure_state(update.effective_user.id)
     st["preview"] = items
     await update.message.reply_text(f"Файл принят. Карточек: {len(items)}")
     await _send_preview_batch(update, context, items)
 
+
 async def on_plain_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Если прислали CSV без команды — тоже пробуем превью (без спама)."""
+    """
+    Свободный текст:
+      1) если похоже на CSV — сразу превью,
+      2) если чат включён — отправляем /chat и, при intent=scrape, запускаем /scrape → PREVIEW,
+      3) иначе подсказываем про CSV.
+    """
     text = (update.message.text or "").strip()
-    if "," in text and "Title" in text and "Должность" in text:
-        data = await api.preview_csv(text)
+    if not text:
+        return
+
+    # (1) Эвристика CSV
+    if is_probable_csv_text(text):
+        data = await api.preview_csv(sanitize_csv_text(text))
         items = data.get("items", [])
         st = _ensure_state(update.effective_user.id)
         st["preview"] = items
         await update.message.reply_text(f"Распознал CSV. Карточек: {len(items)}")
         await _send_preview_batch(update, context, items)
+        return
 
-# ───────────────────────────── callbacks ──────────────────────────────
+    # (2) Чат + намерения
+    if CHAT_ENABLED:
+        data = await api.chat(text)  # {"reply": "...", "intent": {...}}
+        reply = data.get("reply") or ""
+        intent = data.get("intent") or {}
+        action = intent.get("action")
+
+        # Автозапуск скрейпа → PREVIEW
+        if action == "scrape":
+            if not WEB_SCRAPE_ENABLED:
+                await update.message.reply_text((reply + "\n\n⚠️ Веб-скрейп выключен (WEB_SCRAPE_ENABLED=0).").strip())
+                return
+
+            src = intent.get("source") or "zp"
+            qry = intent.get("query") or "медсестра"
+            hosp = intent.get("hospital")
+            pages = int(intent.get("pages") or WEB_DEFAULT_PAGES)
+
+            if reply:
+                await update.message.reply_text(reply)
+
+            prev = await api.scrape(src, qry, hosp, pages)
+            items = prev.get("items", [])
+            st = _ensure_state(update.effective_user.id)
+            st["preview"] = items
+            await update.message.reply_text(
+                f"Готово. Карточек в PREVIEW: {len(items)}.\n"
+                f"Чтобы записать — укажите таблицу: /use_table <TABLE_ID>, затем /confirm."
+            )
+            await _send_preview_batch(update, context, items)
+            return
+
+        # Small talk / подсказки
+        if reply:
+            await update.message.reply_text(reply)
+            return
+
+    # (3) Чат выключен или ничего не распознано
+    await update.message.reply_text("Я работаю с CSV и командами. Пришлите файл или используйте /parse <CSV>.")
+
+
+# ---------------- Callbacks & Helpers ----------------
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -211,10 +281,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Элемент не найден.")
         return
 
-# ───────────────────────────── helpers ────────────────────────────────
 
 async def _send_preview_batch(update: Update, context: ContextTypes.DEFAULT_TYPE, items: List[Dict[str, Any]]):
-    """Отправляем карточки пачкой (до 10 сообщений, чтобы не заспамить)."""
+    """Отправляем до 10 карточек, чтобы не заспамить чат."""
     chat_id = update.effective_chat.id
     if not items:
         await context.bot.send_message(chat_id, "Пусто.")
@@ -224,7 +293,6 @@ async def _send_preview_batch(update: Update, context: ContextTypes.DEFAULT_TYPE
         text, kb = _render_item_card(items[i], i)
         await context.bot.send_message(chat_id, text, reply_markup=kb)
 
-# ───────────────────────────── wiring ─────────────────────────────────
 
 def register(app):
     app.add_handler(CommandHandler("start", cmd_start))
@@ -236,7 +304,5 @@ def register(app):
     app.add_handler(CommandHandler("confirm", cmd_confirm))
 
     app.add_handler(CallbackQueryHandler(on_callback))
-    # документы .csv/.txt
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
-    # попытка распознать CSV-плейнтекст без команд
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_plain_text))

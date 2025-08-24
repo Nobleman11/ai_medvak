@@ -15,20 +15,25 @@ _MAX_KEEP = int(os.getenv("HTTPX_MAX_KEEPALIVE", "2"))
 _limits = httpx.Limits(max_connections=_MAX_CONN, max_keepalive_connections=_MAX_KEEP)
 _client = httpx.AsyncClient(base_url=AGENT_BASE, timeout=_TIMEOUT, limits=_limits)
 
+
 async def close_client():
+    """Закрыть HTTP-клиент при остановке бота."""
     await _client.aclose()
 
-# ---------- Agent API wrappers ----------
+
+# ---------------- Agent API wrappers ----------------
 
 async def agent_health() -> Dict[str, Any]:
     r = await _client.get("/healthz")
     r.raise_for_status()
     return r.json()
 
+
 async def agent_config() -> Dict[str, Any]:
     r = await _client.get("/config")
     r.raise_for_status()
     return r.json()
+
 
 async def preview_csv(csv_text: str) -> Dict[str, Any]:
     """POST /preview {csv_text} → {version, items:[{record, uncertain, notes, confidence}]}"""
@@ -39,7 +44,8 @@ async def preview_csv(csv_text: str) -> Dict[str, Any]:
     r.raise_for_status()
     return r.json()
 
-async def write_records(records: List[Dict[str, Any]], table_id: str, rel_name: Optional[str]=None) -> Dict[str, Any]:
+
+async def write_records(records: List[Dict[str, Any]], table_id: str, rel_name: Optional[str] = None) -> Dict[str, Any]:
     """POST /write {records, table_id, rel_name} → {results:[...]}"""
     payload = {"records": records, "table_id": table_id, "rel_name": rel_name}
     r = await _client.post("/write", json=payload)
@@ -48,9 +54,20 @@ async def write_records(records: List[Dict[str, Any]], table_id: str, rel_name: 
     r.raise_for_status()
     return r.json()
 
+
 async def scrape(source: str, query: str, hospital: Optional[str], pages: int = 2) -> Dict[str, Any]:
     """POST /scrape {source:'zp'|'hh', query, hospital?, pages} → preview"""
     payload = {"source": source, "query": query, "hospital": hospital, "pages": pages}
     r = await _client.post("/scrape", json=payload)
+    r.raise_for_status()
+    return r.json()
+
+
+async def chat(message: str) -> Dict[str, Any]:
+    """
+    POST /chat {message} → {"reply": "...", "intent": {action, source, query, hospital, pages}}
+    Используется для small talk и извлечения намерений (scrape/parse_csv).
+    """
+    r = await _client.post("/chat", json={"message": message})
     r.raise_for_status()
     return r.json()
